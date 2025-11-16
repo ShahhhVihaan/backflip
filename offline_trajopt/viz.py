@@ -5,7 +5,6 @@ from pathlib import Path
 from pydrake.geometry import StartMeshcat
 from pydrake.visualization import ModelVisualizer
 
-# Robot configurations
 ROBOTS = {
     "go2": {
         "package_name": "go2_description",
@@ -31,24 +30,19 @@ def main(robot: str = None):
         args = parser.parse_args()
         robot = args.robot
 
-    # Validate robot choice
     if robot not in ROBOTS:
         raise ValueError(f"Unknown robot: {robot}. Must be one of: {list(ROBOTS.keys())}")
 
-    # Get project root directory (parent of offline_trajopt)
     script_dir = Path(__file__).parent.resolve()
     project_root = script_dir.parent
 
-    # Get robot configuration
     robot_config = ROBOTS[robot]
     robot_pkg = project_root / "urdf" / robot_config["package_name"]
     pkg_xml = robot_pkg / "package.xml"
 
-    # Setup meshcat and visualizer
     meshcat = StartMeshcat()
     visualizer = ModelVisualizer(meshcat=meshcat)
 
-    # Configure package map
     pm = visualizer.parser().package_map()
     if pkg_xml.exists():
         pm.AddPackageXml(str(pkg_xml))
