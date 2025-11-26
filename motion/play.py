@@ -6,7 +6,7 @@ import numpy as np
 
 XML_PATH = "humanoid.xml"
 PKL_PATH = "humanoid_backflip.pkl"
-Z_OFFSET = 0.0  # might have to adjust if feet clip into ground
+Z_OFFSET = 0  # might have to adjust if feet clip into ground
 
 def rotvec_to_quat_mujoco(v):
     # Converts an axis-angle to a 4D quaternion
@@ -50,7 +50,7 @@ def main():
                 frame_data = raw_traj[i]
                 
                 if frame_data.shape[0] == 34 and model.nq == 35:
-                    # --- CONVERT 34D TO 35D ---
+                    # Convert 34D to 35D
                     root_pos = frame_data[0:3]
                     root_rot_vec = frame_data[3:6]
                     joints = frame_data[6:]
