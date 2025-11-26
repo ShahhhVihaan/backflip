@@ -14,8 +14,15 @@ ROBOTS = {
         "package_name": "g1_description",
         "model_file": "g1_23dof.urdf",
     },
+    "humanoid": {
+        "package_name": "humanoid",
+        "model_file": "humanoid.xml"
+    },
+    "smpl": {
+        "package_name": "smpl",
+        "model_file": "smpl.xml"
+    }
 }
-
 
 def main(robot: str = None):
     if robot is None:
@@ -23,7 +30,7 @@ def main(robot: str = None):
         parser.add_argument(
             "--robot",
             type=str,
-            default="g1",
+            default="smpl",
             choices=list(ROBOTS.keys()),
             help="Robot to visualize (default: go2)",
         )
