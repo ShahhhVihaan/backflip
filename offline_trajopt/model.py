@@ -4,6 +4,7 @@ import numpy as np
 import pinocchio as pin
 from pinocchio.visualize import MeshcatVisualizer
 
+
 mjcf_path = "urdf/humanoid/humanoid.xml"
 model = pin.buildModelFromMJCF(mjcf_path)
 data = model.createData()
