@@ -1,5 +1,7 @@
+
+from offline_trajopt.crouch import Crouch 
 def main():
-    print("Hello from backflip!")
+    Crouch()
 
 
 if __name__ == "__main__":
