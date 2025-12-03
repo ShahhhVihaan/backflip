@@ -4,28 +4,30 @@
   <default>
     <motor ctrlrange="-1 1" ctrllimited="true"/>
     <default class="body">
-      <geom condim="1" friction="1.0 0.05 0.05" solimp=".9 .99 .003" solref=".015 1"/>
+      <geom type="capsule" condim="1" friction=".7" solimp=".9 .99 .003" solref=".015 1" material="body" group="1"/>
+      <!-- <geom condim="1" friction="1.0 0.05 0.05" solimp=".9 .99 .003" solref=".015 1"/> -->
       <joint limited="true" solimplimit="0 .99 .01"/>
     </default>
   </default>
 
   <visual>
-      <map force="0.1" zfar="30"/>
-      <rgba haze="0.15 0.25 0.35 1"/>
-      <quality shadowsize="2048"/>
-      <!-- <global offwidth="800" offheight="800"/> -->
-      <global offwidth="2560" offheight="1440" elevation="-20" azimuth="120"/>
+    <map force="0.1" zfar="30"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global offwidth="2560" offheight="1440" elevation="-20" azimuth="120"/>
   </visual>
 
   <asset>
-      <texture type="skybox" builtin="gradient" rgb1=".3 .5 .7" rgb2="0 0 0" width="512" height="512"/>
-      <texture name="texplane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512" mark="cross" markrgb=".8 .8 .8"/>
-      <material name="matplane" reflectance="0.3" texture="texplane" texrepeat="1 1" texuniform="true"/>
+    <texture type="skybox" builtin="gradient" rgb1=".3 .5 .7" rgb2="0 0 0" width="32" height="512"/>
+    <texture name="body" type="cube" builtin="flat" mark="cross" width="128" height="128" rgb1="0.8 0.6 0.4" rgb2="0.8 0.6 0.4" markrgb="1 1 1"/>
+    <material name="body" texture="body" texuniform="true" rgba="0.8 0.6 .4 1"/>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1=".1 .2 .3" rgb2=".2 .3 .4"/>
+    <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance=".2"/>
   </asset>
 
   <worldbody>
-    <light directional="true" diffuse=".8 .8 .8" specular=".2 .2 .2" pos="0 0 5" dir="0 0 -1"/>
-    <geom name="floor" pos="0 0 0" size="0 0 .25" type="plane" material="matplane" condim="3"/>
+    <light name="spotlight" mode="targetbodycom" target="pelvis" diffuse=".8 .8 .8" specular="0.3 0.3 0.3" pos="0 -6 4" cutoff="30"/>
+    <light name="top" pos="0 0 2" mode="trackcom"/>
+    <geom name="floor" pos="0 0 0" size="0 0 .25" type="plane" material="grid" condim="3"/>
 
 	  <body name="pelvis" pos="0 0 0" childclass="body">
       <freejoint name="root"/>
@@ -33,6 +35,8 @@
       <geom name="upper_waist" type="sphere" pos="0 0 0.205" size="0.07" density="2226"/>
 
       <body name="torso" pos="0 0 0.236151">
+        <camera name="back" pos="-3 0 1" xyaxes="0 -1 0 1 0 2" mode="trackcom"/>
+        <camera name="side" pos="0 -2.5 1" xyaxes="1 0 0 0 1 2" mode="trackcom"/>
         <joint name="abdomen_x" type="hinge" axis="1 0 0" range="-60 60" stiffness="1000" damping="100" armature=".02"/>
         <joint name="abdomen_y" type="hinge" axis="0 1 0" range="-60 90" stiffness="1000" damping="100" armature=".02"/>
         <joint name="abdomen_z" type="hinge" axis="0 0 1" range="-70 70" stiffness="1000" damping="100" armature=".02"/>
@@ -46,6 +50,7 @@
           <joint name="neck_y" type="hinge" axis="0 1 0" range="-40 60" stiffness="100" damping="10" armature=".01"/>
           <joint name="neck_z" type="hinge" axis="0 0 1" range="-45 45" stiffness="100" damping="10" armature=".01"/>
           <geom name="head" type="sphere" pos="0 0 0.175" size="0.095" density="1081"/>
+          <camera name="egocentric" pos=".09 0 0" xyaxes="0 -1 0 .1 0 1" fovy="80"/>
         </body>
 
         <body name="right_upper_arm" pos="-0.02405 -0.18311 0.24350">
