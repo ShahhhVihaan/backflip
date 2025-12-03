@@ -72,6 +72,7 @@ def main():
             viewer.sync()
 
             command = input(f"Frame {i}/{n_frames-1} >> ").strip().lower()
+            # command = input(f"Frame {i}/{n_frames-1} | height: {data_mj.qpos[2]}>> ").strip().lower()
 
             if command == 'q':
                 print("Quitting...")
