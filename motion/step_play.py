@@ -67,6 +67,9 @@ def main():
 
             current_pose[2] += Z_OFFSET
             data_mj.qpos[:] = current_pose
+
+            if i == 0:
+                print(f"first qpos: {data_mj.qpos}")
             
             mujoco.mj_forward(model, data_mj)
             viewer.sync()

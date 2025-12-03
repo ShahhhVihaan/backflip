@@ -27,8 +27,13 @@ def main():
         data = pickle.load(f)
 
     fps = data.get('fps', 30)
+    print(f"fps: {fps}")
     frame_duration = 1.0 / fps
     print(f"Motion loaded. FPS: {fps} (Time per frame: {frame_duration:.4f}s)")
+
+    print("FPS:", data["fps"])
+    print("Num frames:", len(data["frames"]))
+    print("Motion length (seconds):", (len(data["frames"]) - 1) / data["fps"])
 
     raw_frames = data['frames']
     if isinstance(raw_frames[0], dict):

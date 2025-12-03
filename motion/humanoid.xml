@@ -29,7 +29,7 @@
     <light name="top" pos="0 0 2" mode="trackcom"/>
     <geom name="floor" pos="0 0 0" size="0 0 .25" type="plane" material="grid" condim="3"/>
 
-	  <body name="pelvis" pos="0 0 0" childclass="body">
+	  <body name="pelvis" pos="0 0 0.880749" childclass="body">
       <freejoint name="root"/>
       <geom name="pelvis" type="sphere" pos="0 0 0.07" size=".09" density="2226"/>
       <geom name="upper_waist" type="sphere" pos="0 0 0.205" size="0.07" density="2226"/>
@@ -156,4 +156,16 @@
     <motor name='left_ankle_y'    	gear='90' 	joint='left_ankle_y'/>
     <motor name='left_ankle_z'    	gear='90' 	joint='left_ankle_z'/>
   </actuator>
+  
+  <keyframe>
+    <key name="arms"
+        qpos="0 0 0.880749 1 0 0 0  
+              0 0 0   
+              0 0 0   
+              1.55281651 -0.310888141 -0.080201156 0.240463093  
+              -1.55281651  0.310888141  0.080201156 -0.240463093  
+              0 0 0 0 0 0 0 0 0 0 0 0 0"/>
+  </keyframe>
+
+  
 </mujoco>

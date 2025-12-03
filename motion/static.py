@@ -17,7 +17,7 @@ def main():
     # data.qpos[2] += 0.1
 
     # Compute derived quantities at this state
-    data.qpos[2] = 0.8805893739847979   # try ~0.8–1.0 and tune
+    # data.qpos[2] = 0.8805893739847979   # try ~0.8–1.0 and tune
 
     mujoco.mj_forward(model, data)
     
@@ -32,7 +32,7 @@ def main():
 
             # If instead you want it to actually simulate, comment the two lines above
             # and use these:
-            mujoco.mj_step(model, data)
+            # mujoco.mj_step(model, data)
             print(f"pose: {data.qpos[2]}")  # print current pose
             viewer.sync()
 
