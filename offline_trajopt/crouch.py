@@ -105,10 +105,10 @@ def Crouch():
     
     
     # No of Knot points
-    N = 5
-
+    N = 10
+    
     # Total time (sec)
-    T = 3
+    T = 0.5
 
     # Legs on the ground (Change for jumping)
     in_stance = np.ones((2,N))
@@ -138,13 +138,32 @@ def Crouch():
     q_cost.pelvis_qx = 0.0
     q_cost.pelvis_qy = 0.0
     q_cost.pelvis_qz = 0.0
-    q_cost.pelvis_x = 0.0
-    q_cost.pelvis_y = 10.0
+    #q_cost.pelvis_x = 0.5
+    #q_cost.pelvis_y = 1.0
     q_cost.pelvis_z = 0.0
-    q_cost.left_ankle_pitch_joint = 100.0
-    q_cost.right_ankle_pitch_joint = 100.0
-    q_cost.left_ankle_roll_joint = 100.0
-    q_cost.right_ankle_roll_joint = 100.0
+    q_cost.left_hip_roll_joint = 10.0
+    q_cost.right_hip_roll_joint = 10.0
+    q_cost.left_hip_yaw_joint = 10.0
+    q_cost.right_hip_yaw_joint = 10.0
+    q_cost.left_ankle_pitch_joint = 10.0
+    q_cost.right_ankle_pitch_joint = 10.0
+    q_cost.left_ankle_roll_joint = 10.0
+    q_cost.right_ankle_roll_joint = 10.0
+
+    q_crouch_vec = np.copy(q0)
+    q_crouch = PositionView(q_crouch_vec)
+
+    q_crouch.pelvis_z = 0.58
+    q_crouch.left_knee_joint = 0.7
+    q_crouch.right_knee_joint = 0.7
+
+    q_crouch.left_hip_pitch_joint = -0.45
+    q_crouch.right_hip_pitch_joint = -0.45
+
+    q_crouch.left_ankle_pitch_joint = -0.25
+    q_crouch.right_ankle_pitch_joint = -0.25
+
+    y_axis_vector = [0, 1, 0]
 
     for n in range(N):
         # Joint limits
@@ -159,8 +178,28 @@ def Crouch():
             plant.GetVelocityUpperLimits(),
             v[:, n],
         )
+
+        # Body orientation
+        prog.AddConstraint(
+            AngleBetweenVectorsConstraint(
+            plant,
+            body_frame,           # Frame A (Body)
+            y_axis_vector,        # Vector a_A: The Y-axis expressed in Body frame
+            plant.world_frame(),  # Frame B (World)
+            y_axis_vector,        # Vector b_B: The Y-axis expressed in World frame
+            0.0,                  # Minimum angle (radians)
+            0.01,                  # Maximum angle (radians) - The tolerance
+            context[n]
+        ),
+        q[:, n]
+        )
+
+        alpha = n / (N - 1)
+        q_guess = (1 - alpha) * q0 + alpha * q_crouch_vec
+        prog.SetInitialGuess(q[:, n], q_guess)
+    
         prog.SetInitialGuess(v[:, n], [0]*nv)
-        prog.SetInitialGuess(q[:, n], q0)
+        #prog.SetInitialGuess(q[:, n], q0)
         #AddUnitQuaternionConstraintOnPlant(plant, q[:, n], prog)
 
         # Running costs:
@@ -171,14 +210,14 @@ def Crouch():
 
     
     quat_target = np.array([1.0, 0.0, 0.0, 0.0])  # Unit quaternion
-    for n in range(1,N):
+    for n in range(1,N-1):
     # Soft penalty to keep quaternion near unit norm
-        """
+        
         prog.AddQuadraticErrorCost(
             Q=10.0 * np.eye(4),
             x_desired=quat_target,
             vars=q[0:4, n]
-        )"""
+        )
         def unit_norm_cost(quat):
             qw, qx, qy, qz = quat
             norm_sq = qw**2 + qx**2 + qy**2 + qz**2
@@ -191,7 +230,9 @@ def Crouch():
             Q=1000.0 * np.eye(4),
             x_desired=quat_target,
             vars=q[0:4, 0]
-    )  
+            )
+    
+            
     
     
     context_list = [plant.CreateDefaultContext() for _ in range(N)]
@@ -230,7 +271,7 @@ def Crouch():
             if in_stance[foot_idx,n] == 1:
                 # normal force >=0, normal_force == 0 if not in_stance
                 fz_min = 0.05 * total_mass * abs(gravity[-1])     # minimum load
-                fz_max = 1.0  * total_mass * abs(gravity[-1])     # maximum load
+                fz_max = 4.0  * total_mass * abs(gravity[-1])     # maximum load
 
                 prog.AddLinearConstraint(contact_force[c_s][2, n] >=  fz_min)
                 prog.AddLinearConstraint(contact_force[c_s][2, n] <=  fz_max)
@@ -261,15 +302,25 @@ def Crouch():
 
     plant.SetPositions(context[0], q0)
     com0 = plant.CalcCenterOfMassPositionInWorld(context[0], [humanoid_g1])
-    for n in range(N-1):
-        prog.SetInitialGuess(com[:, n], com0)
-    prog.SetInitialGuess(com[:,N-1], com0 - [0,0,0.2])
+    com_start = com0
+    com_final = com0 - np.array([0, 0, 0.2])
+
+# Loop through all knot points
+    for n in range(N):
+        # Calculate interpolation factor alpha (0.0 at start, 1.0 at end)
+        alpha = n / (N - 1)
+    
+        # Linear Interpolation (Lerp): (1 - alpha) * start + alpha * end
+        com_n = (1 - alpha) * com_start + alpha * com_final
+    
+        # Set the guess
+        prog.SetInitialGuess(com[:, n], com_n)
     # Initial CoM position - relaxed to allow some movement
     prog.AddBoundingBoxConstraint(com0[0]-0.02, com0[0]+0.02, com[0, 0])
     prog.AddBoundingBoxConstraint(com0[1]-0.02, com0[1]+0.02, com[1, 0])
     prog.AddBoundingBoxConstraint(com0[2]-0.02, com0[2]+0.02, com[2, 0])
-    prog.AddBoundingBoxConstraint(com0[0]-0.05, com0[0]+0.05, com[0, 1:])
-    prog.AddBoundingBoxConstraint(com0[1]-0.05, com0[1]+0.05, com[1, -1])
+    prog.AddBoundingBoxConstraint(com0[0]-0.02, com0[0]+0.02, com[0, 1:])
+    prog.AddBoundingBoxConstraint(com0[1]-0.02, com0[1]+0.02, com[1, -1])
     # CoM x vel
     prog.AddBoundingBoxConstraint(-0.5, 0.5, comdot[0, :])
     # CoM y vel
@@ -387,13 +438,13 @@ def Crouch():
 
         return Hdot-torque
     
-    
+
     for n in range(N - 1):
         Fn = np.concatenate([contact_force[i][:, n] for i in range(8)])
         prog.AddConstraint(
             partial(angular_momentum_constraint, context_index=n),
-            lb = -0.05 * np.ones(3),
-            ub = 0.05 * np.ones(3),
+            lb = -0.1 * np.ones(3),
+            ub = 0.1 * np.ones(3),
             vars=np.concatenate((q[:, n ], com[:, n], Hdot[:, n], Fn)),
             description=f"H_torque_{n}"
         )
@@ -480,7 +531,7 @@ def Crouch():
                     prog.AddConstraint(
                         PositionConstraint(plant, plant.world_frame(),
                         [-np.inf , -np.inf , -0.001],
-                        [np.inf, np.inf, 0.003], foot_frame[i],
+                        [np.inf, np.inf, 0.005], foot_frame[i],
                         contact_points[m], context[n]), q[:,n]
                     )
                     
@@ -491,8 +542,8 @@ def Crouch():
                             context_index = n-1, 
                             frame = foot_frame[i],
                             contact_point = contact_points[m]),
-                        lb = -0.002*np.ones(3),
-                        ub = 0.002*np.ones(3),
+                        lb = -0.005*np.ones(3),
+                        ub = 0.005*np.ones(3),
                         vars = np.concatenate ((q[:, n - 1], q[:,n]
                         ))
                     
@@ -622,7 +673,7 @@ def Crouch():
     
         plt.tight_layout()
         # uncomment if you want to print
-        #plt.savefig("Tangential_force.png")
+        plt.savefig("Tangential_force.png")
 
         print(f"\nTrajectory duration: {t_sol[-1]:.2f} seconds")
         print(f"Number of knot points: {N}")

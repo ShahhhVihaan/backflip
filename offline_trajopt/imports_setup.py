@@ -32,7 +32,8 @@ from pydrake.all import (
     eq,
     namedview,
     HalfSpace,
-    CoulombFriction
+    CoulombFriction,
+    AngleBetweenVectorsConstraint
 )
 
 print("Successfully loaded all necessary imports.")

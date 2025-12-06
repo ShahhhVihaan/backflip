@@ -6,19 +6,19 @@ def set_home(plant, context):
     )
     q0 = PositionView(np.zeros(plant.num_positions()))
     q0.pelvis_qw = 1.0 # unit quaternion
-    q0.pelvis_z = 0.787
+    q0.pelvis_z = 0.783
      
-    q0.left_hip_pitch_joint_q = -0.00
+    q0.left_hip_pitch_joint_q = -0.02
     q0.left_hip_roll_joint_q = 0
     q0.left_hip_yaw_joint_q = 0
-    q0.left_knee_joint_q = 0.0
+    q0.left_knee_joint_q = 0.05
     q0.left_ankle_pitch_joint_q = 0.0
     q0.left_ankle_roll_joint_q = 0
 
-    q0.right_hip_pitch_joint_q = -0.00
+    q0.right_hip_pitch_joint_q = -0.02
     q0.right_hip_roll_joint_q = 0
     q0.right_hip_yaw_joint_q = 0
-    q0.right_knee_joint_q = 0.0
+    q0.right_knee_joint_q = 0.05
     q0.right_ankle_pitch_joint_q = 0.00
     q0.right_ankle_roll_joint_q = 0
 
