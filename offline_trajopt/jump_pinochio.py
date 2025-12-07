@@ -155,13 +155,32 @@ def solve_pinocchio():
     # Shift base down/up by the error
     q_nom[2] -= height_error
 
-    # get position goals
-    z_stand = q_nom[2]
-    z_crouch = z_stand - 0.35
-    min_com_height = z_crouch - 0.05
-    z_apex = 0.85
+    # height goal for crouch 
+    z_crouch = 0.30
+    #crouch pose guess
+    q_crouch_pose = q_nom
+    q_crouch_pose[2] = q_nom[2] - z_crouch
 
-    delta_h = z_apex - z_stand
+    try:
+        set_q(q_crouch_pose, "left_knee_joint", 1.2)
+        set_q(q_crouch_pose, "right_knee_joint", 1.2) 
+        set_q(q_crouch_pose, "left_hip_pitch_joint", -0.6)
+        set_q(q_crouch_pose, "right_hip_pitch_joint", -0.6)
+        set_q("left_ankle_pitch_joint", -0.6)
+        set_q("right_ankle_pitch_joint", -0.6)
+    except:
+        pass
+    
+    # get COM location 
+    com_stand_pos = f_com(q_nom).full().flatten()
+    
+    # get position goals
+    z_com_stand = com_stand_pos[2]
+    z_com_crouch = z_com_stand - z_crouch
+    min_com_height = z_crouch - 0.10
+    z_com_apex = z_com_stand + 0.4
+
+    delta_h = z_com_apex - z_com_stand
     
     if delta_h < 0:
         print("Error: Target apex is lower than standing height!")
@@ -169,7 +188,7 @@ def solve_pinocchio():
 
     v_z_required = np.sqrt(2 * 9.81 * delta_h)
     
-    print(f"To reach {z_apex}m, Launch Velocity must be: {v_z_required:.3f} m/s")
+    print(f"To reach {z_com_apex}m, Launch Velocity must be: {v_z_required:.3f} m/s")
     
     # Time, Knot points and conctact schedule 
     T_total = 1.2
@@ -213,31 +232,17 @@ def solve_pinocchio():
     v_max = model.velocityLimit.copy() # get velocity limit from model
     v_max[:6] = 15.0
     
-    #crouch pose guess
-    q_crouch_pose = pin.neutral(model)
-    q_crouch_pose[2] = z_crouch
-    try:
-        set_q(q_crouch_pose, "left_knee_joint", 1.2)
-        set_q(q_crouch_pose, "right_knee_joint", 1.2) 
-        set_q(q_crouch_pose, "left_hip_pitch_joint", -0.6)
-        set_q(q_crouch_pose, "right_hip_pitch_joint", -0.6)
-        set_q("left_ankle_pitch_joint", -0.6)
-        set_q("right_ankle_pitch_joint", -0.6)
-    except:
-        pass
+    k_apex = int(k_liftoff + (N_flight/2))
 
-    # Velocity and joint goals 
-    # Start: Stationary and Standing
-    opti.subject_to(qs[0] == q_nom)
-    opti.subject_to(vs[0] == 0)
-
-    # End: Stationary and Standing
-    opti.subject_to(qs[-1] == q_nom)
-    opti.subject_to(vs[-1] == 0)
+    min_x = com_stand_pos[0] - 0.10 
+    max_x = com_stand_pos[0] + 0.10
+    min_y = com_stand_pos[1] - 0.10
+    max_y = com_stand_pos[1] + 0.10
     
-    k_apex = int(k_liftoff + N_flight/2)
-    opti.subject_to(qs[k_apex][2] >= z_apex)
-
+    opti.subject_to(vs[0] == 0)
+    #opti.subject_to(qs[0] == q_nom)
+    #opti.subject_to(qs[-1][2] == q_nom[2])
+    opti.subject_to(vs[-1] == 0)
 
     for k in range(N):
         # 1. Joint Limits
@@ -257,7 +262,18 @@ def solve_pinocchio():
         opti.subject_to(qz == 0)
         
         com_k = f_com(qs[k])
+        
         opti.subject_to(com_k[2] >= min_com_height)
+        is_stance_com = contact_schedule[0, k]
+        if is_stance_com == 1:
+            opti.subject_to(opti.bounded(min_x, com_k[0], max_x))
+            opti.subject_to(opti.bounded(min_y, com_k[1], max_y))
+        if k == k_apex:
+            opti.subject_to(com_k[2] >= z_com_apex)
+        if k == 0 or k == N:
+            opti.subject_to(com_k[2] == z_com_stand)
+            opti.subject_to(com_k[0] == com_stand_pos[0])
+            opti.subject_to(com_k[1] == com_stand_pos[1])
 
         if k < N - 1:
             h = dt[k]
@@ -270,7 +286,7 @@ def solve_pinocchio():
             # Get current COM and Momentum
             ang_mom_k, lin_mom_k = f_mom(qs[k], vs[k])
             ang_mom_next, lin_mom_next = f_mom(qs[k+1], vs[k+1])
-            com_k = f_com(qs[k])
+            
 
             # Finite Difference Derivatives
             lin_force_total = cas.vertcat(0,0,0)
@@ -302,7 +318,7 @@ def solve_pinocchio():
                         opti.subject_to(p_corner_world[2] == 0) # On ground
                     else:
                         opti.subject_to(f_corner == 0)
-                        opti.subject_to(p_corner_world[2] >= 0.02)
+                        opti.subject_to(p_corner_world[2] >= 0.0)
 
             # Linear Dynamics Constraint
             # mv_next - mv_curr = h * (forces + mg)
@@ -320,9 +336,9 @@ def solve_pinocchio():
 
     cost = 0 
     # Cost for base location 
-    w_base_pos_x = 15.0   
-    w_base_pos_y = 30.0
-    w_base_pos_z = 50.0 
+    w_com_pos_x = 15.0   
+    w_com_pos_y = 30.0
+    w_com_pos_z = 50.0 
 
     # cost matrix for joints
     n_actuated = model.nq - 7
@@ -338,10 +354,11 @@ def solve_pinocchio():
             w_joints_vector[idx_in_cost_vector] = 1
         else:
             w_joints_vector[idx_in_cost_vector] = 30.0
-
+    # cost for weights
     W_joints = cas.MX(w_joints_vector)        
-    # cost for roation
-    w_base_rot = 30.0    
+    w_base_rot = 30.0 
+    w_force = 1e-3
+    w_force_rate = 1e-4
     # Minimize joint velocities (smoothness)
     for k in range(N):
         cost += 1e-5 * cas.sumsqr(vs[k])    
@@ -351,8 +368,10 @@ def solve_pinocchio():
         for f_idx in range(2):      # Loop over 2 feet
             for c_idx in range(4):  # Loop over 4 corners
                 # access the specific MX variable
-                f_corner = fs[k][f_idx][c_idx] 
-                cost += 1e-3 * cas.sumsqr(f_corner)
+                f_corner_current = fs[k][f_idx][c_idx] 
+                cost += w_force * cas.sumsqr(f_corner_current)
+                
+
 
     for k in range(N):
         
@@ -361,28 +380,28 @@ def solve_pinocchio():
             w_acc = 0.01 
             cost += w_acc * cas.sumsqr(acc)
 
-        target_z = z_stand
+        target_com_z = z_com_stand
         q_target_joints = q_nom[7:]
-        current_w_z = w_base_pos_z
-
-        if k<k_liftoff:
-            if k < k_liftoff/2:    
-                target_z = z_crouch
-                q_target_joints = q_crouch_pose[7:]
+        current_w_z = w_com_pos_z
+        k_bottom = k_liftoff / 2.0
+        if k<k_liftoff:  
+            if k < k_bottom:
+                progress = k / k_bottom
+                factor = (1.0 - np.cos(progress * np.pi)) / 2.0
+                target_com_z = z_com_stand + (z_com_crouch - z_com_stand) * factor
             else:
-                target_z = z_stand
-                q_target_joints = q_nom[7:]
-
+                progress = (k - k_bottom) / (k_liftoff - k_bottom)
+                factor = (1.0 - np.cos(progress * np.pi)) / 2.0
+                target_com_z = z_com_crouch + (z_com_stand - z_com_crouch) * factor
         elif k < k_touchdown:
-            current_w_z = 0.0
-            q_target_joints = q_crouch_pose[7:]
+            current_w_z = 0.0  
+            target_com_z = 0.0
         else:
-            target_z = z_stand
-            q_target_joints = q_nom[7:]
+            target_com_z = z_com_stand
 
-        cost += w_base_pos_x * cas.sumsqr(qs[k][0] - q_nom[0]) # Keep base near origin
-        cost += w_base_pos_y * cas.sumsqr(qs[k][1] - q_nom[1]) # Keep base near origin
-        cost += current_w_z * cas.sumsqr(qs[k][2] - target_z) # Keep base near target height
+        cost += w_com_pos_x * cas.sumsqr(qs[k][0] - q_nom[0]) # Keep base near origin
+        cost += w_com_pos_y * cas.sumsqr(qs[k][1] - q_nom[1]) # Keep base near origin
+        cost += current_w_z * cas.sumsqr(qs[k][2] - target_com_z) # Keep base near target height
         q_diff = qs[k][7:] - q_target_joints
         cost += cas.sum1(W_joints * q_diff**2)
         cost += w_base_rot * cas.sumsqr(qs[k][3:7] - q_nom[3:7])
@@ -393,17 +412,23 @@ def solve_pinocchio():
     opts = {
         "ipopt.print_level": 5, 
         "ipopt.max_iter": 300, 
-        "ipopt.tol": 1e-2  # changed for now
+        "ipopt.tol": 1e-3  # changed for now
     }
     opti.solver("ipopt", opts)
-    
+    k_bottom = int(k_liftoff/2)
     # Initial Guess
+    z_stand = q_nom[2]
+    z_apex = q_nom[2] + delta_h
     for k in range(N):
-        if k < k_liftoff:
-            progress = k / k_liftoff
+        if k < k_bottom:
+            progress = k / k_bottom
             z_val = z_stand + (z_crouch - z_stand) * np.sin(progress * np.pi / 2)
             # Create a guess that moves linearly
             q_k = pin.interpolate(model, q_nom, q_crouch_pose, progress)
+        elif k < k_liftoff:
+            progress = (k - k_bottom) / (k_liftoff - k_bottom)
+            q_k = pin.interpolate(model, q_crouch_pose, q_nom, progress)
+            z_val = z_crouch + (z_stand - z_crouch) * progress
         elif k < k_touchdown:
             progress = (k - k_liftoff) / N_flight
             z_val = z_crouch + (z_apex - z_crouch) * 4 * progress * (1 - progress)
@@ -417,7 +442,12 @@ def solve_pinocchio():
         opti.set_initial(qs[k], q_k)
 
         if k < N-1:
-            opti.set_initial(vs[k], np.zeros(model.nv))
+            if k_bottom < k < k_liftoff:
+                 # Guess upward velocity during thrust
+                 opti.set_initial(vs[k], np.zeros(model.nv)) 
+                 opti.set_initial(vs[k][2], 2.0) # Guess 2 m/s upwards
+            else:
+                 opti.set_initial(vs[k], np.zeros(model.nv))
         
     for k in range(N-1):    
         opti.set_initial(dt[k], T_total/N)
@@ -546,7 +576,7 @@ def solve_pinocchio():
     plt.legend()
     plt.grid(True)
     plt.savefig(results_dir / "corner_forces.png", dpi=300)
-    plt.show(block=False)
+
 
     
     
@@ -574,15 +604,16 @@ def solve_pinocchio():
     # Simple Meshcat Animation
     
     fps = 30.0             # Target Frames Per Second
-    duration_per_step = 0.1 # How many seconds to spend moving between step k and k+1
+    playback_speed = 0.1 # How many seconds to spend moving between step k and k+1
         
     while True:
         for k in range(N - 1):
             q_start = q_sol[k]
             q_end = q_sol[k+1]
-            
+            dt_k = dt_val[k]
             # Calculate how many sub-frames we need for this step
-            n_substeps = int(duration_per_step * fps)
+            duration_for_step = dt_k / playback_speed
+            n_substeps = int(duration_for_step * fps)
             
             for i in range(n_substeps):
                 alpha = i / n_substeps # Goes from 0.0 to 1.0
@@ -594,7 +625,7 @@ def solve_pinocchio():
                 time.sleep(1.0 / fps)
         
         time.sleep(2) # Pause before restarting
-        # uncomment if you want to print
+        
         
     return q_sol
 
