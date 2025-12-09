@@ -24,6 +24,28 @@ def load_robot():
     robot.initViewer(loadModel=True)
     return robot
 
+def compute_phase_times(t, N_push=30, N_flight=20, N_land=30):
+    N_total = len(t)
+    assert N_total == N_push + N_flight + N_land, "Phase counts don't match total knots"
+
+    idx_push_end = N_push - 1
+    idx_flight_end = N_push + N_flight - 1
+    idx_land_end = N_total - 1  # or N_push + N_flight + N_land - 1
+
+    T_push = float(t[idx_push_end] - t[0])
+    T_flight = float(t[idx_flight_end] - t[idx_push_end])
+    T_land = float(t[idx_land_end] - t[idx_flight_end])
+    T_total = float(t[idx_land_end] - t[0])
+
+    print(f"Phase times (from actual non-uniform t):")
+    print(f"Push (0 -> {idx_push_end}) : {T_push:.6f} s")
+    print(f"Flight ({idx_push_end} -> {idx_flight_end}) : {T_flight:.6f} s")
+    print(f"Land ({idx_flight_end} -> {idx_land_end}) : {T_land:.6f} s")
+    print(f"Total : {T_total:.6f} s")
+
+    return T_push, T_flight, T_land, T_total
+
+
 
 def load_trajectory():
     script_dir = Path(__file__).parent.resolve()
@@ -111,6 +133,7 @@ def play_trajectory(robot, t, q, fps=60.0, loop=True):
 def main():
     robot = load_robot()
     t, q, dt = load_trajectory()
+    compute_phase_times(t)
 
     play_trajectory(robot, t, q)
     # play_trajectory_raw(robot, t, q)
