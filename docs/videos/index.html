@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Humanoid Backflip</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 900px;
+      margin: 2rem auto;
+      padding: 0 1rem 3rem;
+      background: #0b0c10;
+      color: #f5f5f5;
+    }
+    h1, h2 {
+      text-align: center;
+    }
+    .video-container {
+      margin: 2rem 0;
+    }
+    video {
+      width: 100%;
+      max-height: 480px;
+      display: block;
+      margin: 0.5rem auto;
+      background: #000;
+    }
+    .caption {
+      text-align: center;
+      font-size: 0.95rem;
+      color: #c0c0c0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Humanoid Backflip</h1>
+  <p style="text-align:center;">
+    Offline trajectory optimization, online whole-body control, and MPC results.
+  </p>
+
+  <div class="video-container">
+    <h2>Jump – Offline Optimization</h2>
+    <video controls preload="metadata">
+      <source src="videos/jump_offline.mp4" type="video/mp4" />
+      Your browser does not support the video tag.
+    </video>
+    <div class="caption">
+      Offline jump kino-dynamic trajectory optimization.
+    </div>
+  </div>
+
+  <div class="video-container">
+    <h2>Jump – Online Tracking</h2>
+    <video controls preload="metadata">
+      <source src="videos/jump_online.mp4" type="video/mp4" />
+      Your browser does not support the video tag.
+    </video>
+    <div class="caption">
+      Online jump whole-body + MPC controller tracking.
+    </div>
+  </div>
+
+  <div class="video-container">
+    <h2>Backflip</h2>
+    <video controls preload="metadata">
+      <source src="videos/backflip.mp4" type="video/mp4" />
+      Your browser does not support the video tag.
+    </video>
+    <div class="caption">
+      Offline backflip kino-dynamic trajectory optimization.
+    </div>
+  </div>
+</body>
+</html>
