@@ -10,7 +10,7 @@ from pinocchio.robot_wrapper import RobotWrapper
 
 import osqp
 import scipy.sparse as sp
-import matplotlib.pyplot as plt  # NEW: for plotting
+import matplotlib.pyplot as plt
 
 # ------------------------------------------------------------------
 # Paths (from your project layout)
@@ -34,6 +34,7 @@ CORNER_OFFSETS = [
 ]
 
 MU_FRICTION = 0.5
+GRAVITY = 9.81
 
 
 # ================================================================
@@ -91,7 +92,7 @@ def aggregate_foot_wrenches(model, data, q_k, f_corner_k, foot_ids):
     for foot_idx, frame_id in enumerate(foot_ids):
         oMf = data.oMf[frame_id]
         p_frame = oMf.translation              # world position
-        Rwf = oMf.rotation                     # world R frame ( ^W R_F )
+        Rwf = oMf.rotation                     # ^W R_F
 
         f_total_world   = np.zeros(3)
         tau_total_world = np.zeros(3)
@@ -114,6 +115,48 @@ def aggregate_foot_wrenches(model, data, q_k, f_corner_k, foot_ids):
 
 
 # ================================================================
+# HELPER: COM PITCH TORQUE FROM CONTACT WRENCHES
+# ================================================================
+def compute_pitch_torque_about_com(model, data, q, v, f_contact, foot_ids):
+    """
+    Compute net sagittal-plane torque about the COM from the *actual* contact
+    wrenches in f_contact (shape (12,): [FL(6), FR(6)] in LOCAL_WORLD_ALIGNED).
+
+    Returns:
+        tau_y_com : scalar, net pitch torque about COM in WORLD frame
+    """
+    # Update kinematics + COM
+    pin.forwardKinematics(model, data, q, v)
+    pin.updateFramePlacements(model, data)
+    pin.centerOfMass(model, data, q, v)
+    com = data.com[0].copy()   # (3,)
+
+    tau_com_world = np.zeros(3)
+
+    for foot_idx, frame_id in enumerate(foot_ids):
+        oMf = data.oMf[frame_id]
+        p_foot = oMf.translation       # world position of foot frame
+        Rwf = oMf.rotation             # world R foot
+
+        base = 6 * foot_idx
+        f_lin_local = f_contact[base : base + 3]
+        f_ang_local = f_contact[base + 3 : base + 6]
+
+        # Convert to world
+        F_world = Rwf @ f_lin_local
+        tau_foot_world = Rwf @ f_ang_local
+
+        # torque about COM: tau_foot + (r × F)
+        r = p_foot - com
+        tau_world = tau_foot_world + np.cross(r, F_world)
+
+        tau_com_world += tau_world
+
+    # Return the pitch (y) component
+    return tau_com_world[1]
+
+
+# ================================================================
 # HELPER: FINITE-DIFFERENCE ddq_ref
 # ================================================================
 def generalized_ddq_ref(v_k, v_kp1, h, ddq_max=40.0):
@@ -127,6 +170,204 @@ def generalized_ddq_ref(v_k, v_kp1, h, ddq_max=40.0):
     ddq = (v_kp1 - v_k) / h
     ddq = np.clip(ddq, -ddq_max, ddq_max)
     return ddq
+
+
+# ================================================================
+# LUMPED PARAMS + STATE EXTRACTION FOR LANDING MPC
+# ================================================================
+def estimate_lumped_params(model, q0):
+    """
+    Estimate:
+      - total mass
+      - effective pitch inertia Iy at COM in the nominal pose q0
+    """
+    m = pin.computeTotalMass(model)
+
+    data = model.createData()
+    v0 = np.zeros(model.nv)
+
+    pin.centerOfMass(model, data, q0, v0)
+    pin.ccrba(model, data, q0, v0)  # centroidal composite rigid body algo
+    Ig = data.Ig  # spatial inertia at COM (6x6)
+
+    # Effective pitch inertia (around y-axis in world frame) ~ element (1,1) of rotational block
+    I_rot = Ig.inertia  # 3x3
+    Iy = I_rot[1, 1]
+
+    return m, Iy
+
+
+def quat_to_pitch(q_base):
+    """
+    Extract a simple pitch angle (rotation about world y) from a base quaternion.
+    q_base: [x, y, z, w]
+    """
+    x, y, z, w = q_base
+    R = pin.Quaternion(w, x, y, z).toRotationMatrix()
+    pitch = np.arctan2(-R[2, 0], np.sqrt(R[0, 0]**2 + R[1, 0]**2))
+    return pitch
+
+
+def extract_com_pitch_state(model, data, q, v):
+    """
+    Build a 6D lumped state:
+        x = [ x_COM, z_COM, pitch, vx_COM, vz_COM, omega_y ]
+    """
+    # COM + COM velocity
+    pin.centerOfMass(model, data, q, v)
+    com = data.com[0].copy()
+    vcom = data.vcom[0].copy()
+
+    # Base quaternion is in q[3:7] for free-flyer
+    q_base = q[3:7]
+    pitch = quat_to_pitch(q_base)
+
+    # Free-flyer twist: v[0:3] angular, v[3:6] linear in world frame
+    omega_base = v[0:3]
+
+    x = np.zeros(6)
+    x[0] = com[0]           # x
+    x[1] = com[2]           # z (height)
+    x[2] = pitch            # pitch
+    x[3] = vcom[0]          # vx
+    x[4] = vcom[2]          # vz
+    x[5] = omega_base[1]    # omega_y
+
+    return x
+
+
+# ================================================================
+# MINI LANDING "MPC" QP (single-step)
+# ================================================================
+def landing_mpc_qp(x_cur, x_ref, m, Iy, h):
+    """
+    Single-step QP on lumped model:
+
+      state: x = [x, z, pitch, vx, vz, omega_y]
+      input: u = [Fx, Fz, Ty]
+
+    Dynamics (discrete, forward Euler):
+      x_next = x + h * [vx,
+                        vz,
+                        omega_y,
+                        Fx/m,
+                        Fz/m - g,
+                        Ty/Iy]
+
+    Cost:
+      0.5 * (x_next - x_ref)^T Q (x_next - x_ref) + 0.5 * u^T R u
+
+    Returns:
+      u_opt = [Fx, Fz, Ty]
+    """
+    # Tuning
+    Q = np.diag([
+        1.0,   # x
+        10.0,  # z
+        50.0,  # pitch
+        0.1,   # vx
+        5.0,   # vz
+        20.0,  # omega_y
+    ])
+    R = np.diag([
+        1e-3,  # Fx
+        1e-3,  # Fz
+        1e-4,  # Ty
+    ])
+
+    # Build discrete A, B, and gravity bias
+    A = np.eye(6)
+    A[0, 3] = h      # x_next depends on vx
+    A[1, 4] = h      # z_next depends on vz
+    A[2, 5] = h      # pitch_next depends on omega_y
+
+    B = np.zeros((6, 3))
+    B[3, 0] = h / m       # vx_next: Fx
+    B[4, 1] = h / m       # vz_next: Fz
+    B[5, 2] = h / Iy      # omega_next: Ty
+
+    g_bias = np.zeros(6)
+    g_bias[4] = -GRAVITY * h  # vz term
+
+    # x_next - x_ref = (A x_cur + g_bias - x_ref) + B u
+    e = A @ x_cur + g_bias - x_ref
+
+    # QP: 0.5 u^T P u + q^T u
+    P = B.T @ Q @ B + R
+    q = B.T @ Q @ e
+
+    # Bounds on u = [Fx, Fz, Ty]
+    Fz_max = 4.0 * m * GRAVITY
+    Fx_max = MU_FRICTION * Fz_max * 0.5   # somewhat conservative
+    Ty_max = 0.5 * m * GRAVITY * 0.5      # very rough guess
+
+    u_lower = np.array([-Fx_max, 0.0,      -Ty_max])
+    u_upper = np.array([ Fx_max,  Fz_max,   Ty_max])
+
+    # Encode bounds as I * u between lower/upper
+    A_ineq = np.eye(3)
+    l_ineq = u_lower
+    u_ineq = u_upper
+
+    prob = osqp.OSQP()
+    prob.setup(
+        P=sp.csc_matrix(P),
+        q=q,
+        A=sp.csc_matrix(A_ineq),
+        l=l_ineq,
+        u=u_ineq,
+        verbose=False,
+        polish=True,
+        eps_abs=1e-6,
+        eps_rel=1e-6,
+        max_iter=10000,
+    )
+    res = prob.solve()
+
+    if res.info.status_val not in (
+        osqp.constant("OSQP_SOLVED"),
+        osqp.constant("OSQP_SOLVED_INACCURATE"),
+    ):
+        # Fallback: simple PD-like heuristic if QP fails
+        Fx = -50.0 * x_cur[3]   # brake vx
+        Fz = max(0.0, m * GRAVITY - 50.0 * x_cur[4])
+        Ty = -50.0 * x_cur[2] - 5.0 * x_cur[5]
+        u_opt = np.array([Fx, Fz, Ty])
+    else:
+        u_opt = res.x
+
+    return u_opt  # [Fx, Fz, Ty]
+
+
+# ================================================================
+# HELPER: NET FOOT FORCE IN WORLD FROM WBIC WRENCH
+# ================================================================
+def foot_force_world_from_wrench(model, data, q, foot_ids, f_contact, foot_idx):
+    """
+    From the QP contact wrench (LOCAL_WORLD_ALIGNED), extract the *net*
+    ground reaction force at a given foot, expressed in WORLD.
+
+    Args:
+        model, data : Pinocchio model/data
+        q           : current configuration
+        foot_ids    : [left_frame_id, right_frame_id]
+        f_contact   : (12,) = [FL(6), FR(6)] in LOCAL_WORLD_ALIGNED
+        foot_idx    : 0 for left, 1 for right
+
+    Returns:
+        F_world : (3,) net GRF at that foot in WORLD frame
+    """
+    pin.forwardKinematics(model, data, q)
+    pin.updateFramePlacements(model, data)
+
+    frame_id = foot_ids[foot_idx]
+    oMf = data.oMf[frame_id]
+    Rwf = oMf.rotation  # ^W R_F
+
+    base = 6 * foot_idx
+    f_lin_local = f_contact[base : base + 3]  # Fx, Fy, Fz in LWA
+    F_world = Rwf @ f_lin_local
+    return F_world
 
 
 # ================================================================
@@ -144,7 +385,7 @@ def wbic_solve_step(
     foot_ids,
     # ddq weights
     w_ddq_base=1e-4,
-    w_ddq_joints=1e-2,
+    w_ddq_joints=1e-2,   # slightly softer than before
     # force tracking weights (axis-specific)
     w_fx=5e-2,
     w_fy=5e-2,
@@ -152,10 +393,20 @@ def wbic_solve_step(
     w_tau=1e-4,
     phase_name="WBIC",
     use_force_tracking=True,
+    f_ref_override=None,
 ):
     """
     WBIC-style QP:
       variables: x = [ddq (nv); fL (6); fR (6)]
+
+    Cost:
+      - track ddq_des = ddq_ref_k + joint-PD(q,v)
+      - track net foot wrenches (Fx, Fy, Fz, Torques)
+
+    Constraints:
+      - floating-base dynamics
+      - contact kinematics: Jc ddq + Jdotv = 0
+      - friction pyramid + unilateral
     """
     nv = model.nv
     nc = 2
@@ -202,12 +453,29 @@ def wbic_solve_step(
 
     # Cost weights on ddq
     w_ddq = np.ones(nv) * w_ddq_joints
-    w_ddq[:6] = w_ddq_base
 
-    # Force tracking from corner forces
-    if use_force_tracking and (f_corner_k is not None):
-        f_ref_foot = aggregate_foot_wrenches(model, data, q_ref_k, f_corner_k, foot_ids)
-        f_ref = f_ref_foot.reshape(-1)   # (12,)
+    # Base indices (free-flyer): 0:3 translational, 3:6 rotational
+    w_base_trans = 5e2
+    w_base_rot   = 5e4
+
+    w_ddq[0:3] = w_base_trans
+    w_ddq[3:6] = w_base_rot
+
+    # ------------------------------------------------------------------
+    # Force tracking target f_ref (12,)
+    # ------------------------------------------------------------------
+    if use_force_tracking:
+        if f_ref_override is not None:
+            # Use MPC-provided desired foot wrenches (2,6)
+            f_ref_foot = f_ref_override  # shape (2,6)
+        elif f_corner_k is not None:
+            # Use offline centroidal optimizer corner forces
+            f_ref_foot = aggregate_foot_wrenches(
+                model, data, q_ref_k, f_corner_k, foot_ids
+            )
+        else:
+            f_ref_foot = np.zeros((2, 6))
+        f_ref = f_ref_foot.reshape(-1)
 
         w_f = np.zeros(nf)
         for foot_idx in range(nc):
@@ -221,7 +489,6 @@ def wbic_solve_step(
             w_f[base + 4] = w_tau
             w_f[base + 5] = w_tau
     else:
-        f_ref_foot = np.zeros((nc, 6))
         f_ref = np.zeros(nf)
         w_f   = np.zeros(nf)
 
@@ -336,55 +603,99 @@ def wbic_solve_step(
         ddq = x_opt[:nv]
         f_contact = x_opt[nv:]
 
-    return ddq, f_contact, f_ref_foot  # NOTE: return f_ref_foot explicitly
+    return ddq, f_contact
 
 
 # ================================================================
 # PLOTTING
 # ================================================================
-def plot_results(t_log, com_ref_log, com_sim_log, f_ref_log, f_qp_log, N_push):
-    t_log = np.array(t_log)
-    com_ref_log = np.array(com_ref_log)  # (T,3)
-    com_sim_log = np.array(com_sim_log)  # (T,3)
-    f_ref_log = np.array(f_ref_log)      # (T,2,6)
-    f_qp_log  = np.array(f_qp_log)       # (T,2,6)
+def plot_results(
+    t_log,
+    com_ref_log,
+    com_sim_log,
+    f_ref_point_log,
+    f_qp_point_log,
+    t_push_end,
+    t_flight_end,
+    results_dir=RESULTS_DIR,
+):
+    """
+    Plots:
+      1) COM trajectory (x, y, z) reference vs simulated over all phases.
+      2) Contact force at ONE corner of the right foot (Fx, Fy, Fz)
+         reference vs WBIC-derived GRF over all phases.
+    """
+    t_log = np.asarray(t_log)
+    com_ref_log = np.asarray(com_ref_log)       # (T,3)
+    com_sim_log = np.asarray(com_sim_log)       # (T,3)
+    f_ref_point_log = np.asarray(f_ref_point_log)  # (T,3)
+    f_qp_point_log  = np.asarray(f_qp_point_log)   # (T,3)
 
-    t_push = t_log[N_push-1]
+    # Global style (keep it simple + compatible)
+    plt.rcParams.update({
+        "font.family": "DejaVu Sans",
+        "font.size": 11,
+        "axes.grid": True,
+        "grid.alpha": 0.3,
+        "axes.edgecolor": "0.4",
+        "axes.linewidth": 0.8,
+        "figure.dpi": 150,
+    })
 
-    # --- COM position ---
-    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(8, 8))
-    labels = ['x', 'y', 'z']
+    c_ref = "#1f77b4"   # dark-ish blue
+    c_sim = "#ff7f0e"   # dark-ish orange
+
+    # ============================================================
+    # 1) COM trajectory (all phases)
+    # ============================================================
+    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(7.5, 7.0))
+    labels = ["x", "y", "z"]
+
     for i in range(3):
-        axes[i].plot(t_log, com_ref_log[:, i], label='ref')
-        axes[i].plot(t_log, com_sim_log[:, i], '--', label='sim')
-        axes[i].axvline(t_push, linestyle=':', alpha=0.7)
-        axes[i].set_ylabel(f'COM {labels[i]} [m]')
-    axes[0].set_title('COM position: reference vs simulated (stance + flight)')
-    axes[-1].set_xlabel('time [s]')
-    axes[0].legend()
+        ax = axes[i]
+        ax.plot(t_log, com_ref_log[:, i], color=c_ref, lw=1.8, label="reference")
+        ax.plot(t_log, com_sim_log[:, i], color=c_sim, lw=1.4, ls="--", label="simulated")
+
+        # phase markers
+        ax.axvline(t_push_end, color="0.5", ls="--", lw=1.0)
+        ax.axvline(t_flight_end, color="0.5", ls="--", lw=1.0)
+
+        ax.set_ylabel(f"COM {labels[i]} [m]")
+
+    axes[0].set_title("COM trajectory (all phases)")
+    axes[-1].set_xlabel("time [s]")
+    axes[0].legend(loc="upper right")
     fig.tight_layout()
-    plt.savefig(RESULTS_DIR / "com_position.png")
+    fig.savefig(results_dir / "com_all_phases.png", bbox_inches="tight")
+    plt.close(fig)
 
-    # --- Forces (Fx, Fy, Fz) per foot ---
-    comp_names = ['Fx', 'Fy', 'Fz']
-    for foot_idx, foot_name in enumerate(FOOT_NAMES):
-        fig, axes = plt.subplots(3, 1, sharex=True, figsize=(8, 8))
-        for i in range(3):
-            axes[i].plot(t_log, f_ref_log[:, foot_idx, i], label='ref')
-            axes[i].plot(t_log, f_qp_log[:, foot_idx, i], '--', label='QP')
-            axes[i].axvline(t_push, linestyle=':', alpha=0.7)
-            axes[i].set_ylabel(f'{comp_names[i]} [N]')
-        axes[0].set_title(f'{foot_name}: force tracking (LOCAL_WORLD_ALIGNED)')
-        axes[-1].set_xlabel('time [s]')
-        axes[0].legend()
-        fig.tight_layout()
+    # ============================================================
+    # 2) Contact force at ONE contact point (Fx, Fy, Fz)
+    # ============================================================
+    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(7.5, 7.0))
+    comp_names = ["Fx", "Fy", "Fz"]
 
-    plt.savefig(RESULTS_DIR / "forces.png")
-    plt.close()
+    for i in range(3):
+        ax = axes[i]
+        ax.plot(t_log, f_ref_point_log[:, i], color=c_ref, lw=1.8, label="reference")
+        ax.plot(t_log, f_qp_point_log[:, i], color=c_sim, lw=1.4, ls="--", label="ours (WBIC)")
+
+        ax.axvline(t_push_end, color="0.5", ls="--", lw=1.0)
+        ax.axvline(t_flight_end, color="0.5", ls="--", lw=1.0)
+
+        ax.set_ylabel(f"{comp_names[i]} [N]")
+
+    axes[0].set_title("Ground reaction force at one contact point (all phases)")
+    axes[-1].set_xlabel("time [s]")
+    axes[0].legend(loc="upper right")
+    fig.tight_layout()
+    fig.savefig(results_dir / "contact_force_single_point.png", bbox_inches="tight")
+    plt.close(fig)
+
 
 
 # ================================================================
-# MAIN: TAKEOFF WBIC → FLIGHT (ref ddq + joint PD)
+# MAIN: PUSH WBIC → FLIGHT (ref ddq + joint PD) → LAND (WBIC+MPC)
 # ================================================================
 def main():
     robot = load_robot()
@@ -392,7 +703,8 @@ def main():
     data  = model.createData()
 
     t, q_ref_all, v_ref_all, dt_all, f_corner_all, meta = load_traj()
-    N = q_ref_all.shape[0]
+    N      = q_ref_all.shape[0]    # number of states
+    N_dt   = dt_all.shape[0]       # = N - 1, number of integration steps
 
     print("Trajectory shapes:")
     print("  t:", t.shape)
@@ -400,30 +712,54 @@ def main():
     print("  v:", v_ref_all.shape)
     print("  dt:", dt_all.shape)
 
-    # Phase split
-    N_push   = 30
-    N_flight = 20
-    N_total  = N_push + N_flight
+    # Lumped parameters for landing MPC
+    m_lumped, Iy_lumped = estimate_lumped_params(model, q_ref_all[0])
+    print(f"Lumped params: m={m_lumped:.3f}, Iy={Iy_lumped:.3f}")
 
-    if N <= N_total:
-        raise RuntimeError(f"Trajectory too short: N={N}, need > {N_total}")
+    # ------------------------------------------------------------
+    # Phase split: PUSH (stance) → FLIGHT → LAND (stance)
+    # ------------------------------------------------------------
+    N_push   = 30     # as before
+    N_flight = 20     # as before
+
+    if N_dt <= N_push + N_flight:
+        raise RuntimeError(
+            f"Not enough knots for landing: N_dt={N_dt}, "
+            f"need > N_push+N_flight={N_push+N_flight}"
+        )
+
+    # Use *all remaining* dt steps for landing
+    N_land  = N_dt - (N_push + N_flight)
+    N_total = N_push + N_flight + N_land   # number of integration steps we simulate
+
+    print(f"Phase lengths: push={N_push}, flight={N_flight}, land={N_land}, total={N_total}")
 
     # Foot frame IDs
     foot_ids = [model.getFrameId(n) for n in FOOT_NAMES]
+
+    # Choose which contact point to plot:
+    # right foot (index 1), corner index 2 (from CORNER_OFFSETS)
+    RIGHT_FOOT_IDX = 1
+    CONTACT_CORNER_IDX = 2
 
     # Flight PD gains (joints only, milder than stance)
     Kp_flight = 150.0
     Kd_flight = 25.0
 
-    # --- Logging containers ---
+    # ------------- logging arrays -------------
     t_log = []
     com_ref_log = []
     com_sim_log = []
-    f_ref_log = []   # (T,2,6)
-    f_qp_log  = []   # (T,2,6)
+    f_ref_point_log = []   # (T,3) force at one corner from offline traj (WORLD)
+    f_qp_point_log  = []   # (T,3) GRF from WBIC at that foot (WORLD)
 
     cycle = 0
-    print(f"\n=== cycle {cycle} : TAKEOFF (WBIC, ddq_ref+PD+force) → FLIGHT (ddq_ref+joint PD, 20 knots) ===\n")
+    print(
+        f"\n=== cycle {cycle} : "
+        f"PUSH (WBIC, ddq_ref+PD+force) → "
+        f"FLIGHT (ddq_ref+joint PD) → "
+        f"LAND (WBIC+MPC, ddq_ref+PD+force) ===\n"
+    )
 
     # Start at reference initial state
     q = q_ref_all[0].copy()
@@ -447,21 +783,40 @@ def main():
 
         speed = np.linalg.norm(v)
 
-        # precompute ref COM for this knot (for logging later)
+        # --- reference COM for logging ---
         pin.centerOfMass(model, data, q_ref_k, v_ref_k)
         com_ref = data.com[0].copy()
 
-        # -------------------- PUSH / TAKEOFF --------------------
+        # -------------------------------
+        # PHASES
+        # -------------------------------
         if k < N_push:
+            # -------------- PUSH WBIC --------------
             print(
                 f"[WBIC-PUSH] cycle={cycle}, k={k}/{N_total-1}, "
                 f"h={h:.4f}, t_sim={t_sim:.4f}, |v|={speed:.3f}"
             )
 
-            ddq_ref_k = generalized_ddq_ref(v_ref_k, v_ref_kp1, h, ddq_max=40.0)
-            f_corner_k = f_corner_all[k]
+            ddq_ref_k   = generalized_ddq_ref(v_ref_k, v_ref_kp1, h, ddq_max=40.0)
+            f_corner_k  = f_corner_all[k]  # (2,4,3) WORLD
 
-            ddq, f_contact, f_ref_foot_k = wbic_solve_step(
+            # phase-dependent weighting inside push
+            if k < N_push - 5:
+                # early stance
+                w_ddq_joints = 1e-3
+                w_fx = 5e-2
+                w_fy = 5e-2
+                w_fz = 5e-3
+                w_tau = 5e-4
+            else:
+                # last 5 push knots: sacrifice Fx/Fy tracking to avoid pitch impulse
+                w_ddq_joints = 1e-3
+                w_fx = 0.0
+                w_fy = 0.0
+                w_fz = 5e-3
+                w_tau = 1e-4
+
+            ddq, f_contact = wbic_solve_step(
                 model,
                 data,
                 q,
@@ -472,14 +827,47 @@ def main():
                 f_corner_k,
                 foot_ids,
                 phase_name="WBIC-PUSH",
+                w_ddq_base=1e-4,
+                w_ddq_joints=w_ddq_joints,
+                w_fx=w_fx,
+                w_fy=w_fy,
+                w_fz=w_fz,
+                w_tau=w_tau,
             )
-            f_qp_foot_k = f_contact.reshape(2, 6)
 
+            # COM pitch torque diagnostic
+            tau_y_com = compute_pitch_torque_about_com(
+                model, data, q, v, f_contact, foot_ids
+            )
+            print(f"[WBIC-PUSH] k={k}, tau_y_com={tau_y_com:.4f}")
+
+            # Liftoff logging
             if k == N_push - 1:
                 speed_ref = np.linalg.norm(v_ref_all[k])
-                print(f"[END PUSH] |v_sim|={speed:.3f}, |v_ref|={speed_ref:.3f}")
-        # ------------------------ FLIGHT ------------------------
-        else:
+
+                pin.centerOfMass(model, data, q, v)
+                com_sim_end  = data.com[0].copy()
+                pin.centerOfMass(model, data, q_ref_all[k], v_ref_all[k])
+                com_ref_end  = data.com[0].copy()
+
+                pin.computeCentroidalMomentum(model, data, q, v)
+                hG = data.hg
+
+                print(f"[END PUSH] |v_sim|   ={speed:.3f}, |v_ref|   ={speed_ref:.3f}")
+                print(f"[END PUSH] ΔCOM     ={com_sim_end - com_ref_end}")
+                print(f"[END PUSH] tau_y_com_liftoff = {tau_y_com:.4f}")
+                print(f"[END PUSH] hG.angular_y      = {hG.angular[1]:.4f}")
+
+            # --- forces for logging (PUSH stance) ---
+            # reference: one corner on right foot in WORLD
+            f_ref_point = f_corner_k[RIGHT_FOOT_IDX, CONTACT_CORNER_IDX, :]
+            # ours: net GRF at right foot from WBIC
+            F_qp_world  = foot_force_world_from_wrench(
+                model, data, q, foot_ids, f_contact, RIGHT_FOOT_IDX
+            )
+
+        elif k < N_push + N_flight:
+            # -------------- FLIGHT --------------
             print(
                 f"[FLIGHT-REF] cycle={cycle}, k={k}/{N_total-1}, "
                 f"h={h:.4f}, t_sim={t_sim:.4f}, |v|={speed:.3f}"
@@ -487,7 +875,7 @@ def main():
 
             ddq = generalized_ddq_ref(v_ref_k, v_ref_kp1, h, ddq_max=40.0)
 
-            # joint PD to stick shape/orientation closer to ref in flight
+            # joint PD in flight
             qj     = q[7:]
             vj     = v[6:]
             qj_ref = q_ref_k[7:]
@@ -495,39 +883,133 @@ def main():
 
             ddq[6:] += Kp_flight * (qj_ref - qj) + Kd_flight * (vj_ref - vj)
 
-            # no QP forces in flight; keep NaNs for plotting
-            f_ref_foot_k = np.full((2, 6), np.nan)
-            f_qp_foot_k  = np.full((2, 6), np.nan)
+            # Touchdown diagnostics at start of landing (next step)
+            if k == N_push + N_flight - 1:
+                print("[FLIGHT] end of flight, next step will be LAND stance.")
 
-        # Integrate (semi-implicit Euler-like)
+            # offline reference forces (should be ~0 in flight, but log anyway)
+            f_corner_k = f_corner_all[k]
+            f_ref_point = f_corner_k[RIGHT_FOOT_IDX, CONTACT_CORNER_IDX, :]
+
+            # ours: no contact → NaNs so the line is broken in plot
+            F_qp_world  = np.full(3, np.nan)
+
+        else:
+            # -------------- LAND WBIC+MPC --------------
+            print(
+                f"[WBIC-LAND] cycle={cycle}, k={k}/{N_total-1}, "
+                f"h={h:.4f}, t_sim={t_sim:.4f}, |v|={speed:.3f}"
+            )
+
+            ddq_ref_k  = generalized_ddq_ref(v_ref_k, v_ref_kp1, h, ddq_max=40.0)
+
+            # Build lumped state from *current* sim state
+            x_cur = extract_com_pitch_state(model, data, q, v)
+            # And from reference
+            x_ref = extract_com_pitch_state(model, data, q_ref_k, v_ref_k)
+
+            # Landing MPC: choose net Fx, Fz, Ty at COM
+            Fx_net, Fz_net, Ty_net = landing_mpc_qp(
+                x_cur, x_ref, m_lumped, Iy_lumped, h
+            )
+
+            # Split net forces equally between two feet, ignore direct torques
+            f_ref_foot = np.zeros((2, 6))
+            for foot_idx in range(2):
+                f_ref_foot[foot_idx, 0] = Fx_net / 2.0   # Fx
+                f_ref_foot[foot_idx, 1] = 0.0            # Fy
+                f_ref_foot[foot_idx, 2] = Fz_net / 2.0   # Fz
+
+            # Landing weighting: prioritize vertical support and pitch control
+            w_ddq_joints = 1e-3
+            w_fx = 1e-2
+            w_fy = 1e-3
+            w_fz = 1e-2
+            w_tau = 1e-4
+
+            ddq, f_contact = wbic_solve_step(
+                model,
+                data,
+                q,
+                v,
+                q_ref_k,
+                v_ref_k,
+                ddq_ref_k,
+                f_corner_k=None,            # ignore offline forces in landing cost
+                foot_ids=foot_ids,
+                phase_name="WBIC-LAND",
+                w_ddq_base=1e-4,
+                w_ddq_joints=w_ddq_joints,
+                w_fx=w_fx,
+                w_fy=w_fy,
+                w_fz=w_fz,
+                w_tau=w_tau,
+                use_force_tracking=True,
+                f_ref_override=f_ref_foot,  # MPC target
+            )
+
+            tau_y_com = compute_pitch_torque_about_com(
+                model, data, q, v, f_contact, foot_ids
+            )
+            print(f"[WBIC-LAND] k={k}, tau_y_com={tau_y_com:.4f}")
+
+            # Optional: log "touchdown" metrics at first landing step
+            if k == N_push + N_flight:
+                pin.computeCentroidalMomentum(model, data, q, v)
+                hG = data.hg
+                print(f"[START LAND] hG.angular_y = {hG.angular[1]:.4f}")
+
+            # reference: offline corner forces (WORLD)
+            f_corner_k = f_corner_all[k]
+            f_ref_point = f_corner_k[RIGHT_FOOT_IDX, CONTACT_CORNER_IDX, :]
+
+            # ours: net GRF at right foot from WBIC
+            F_qp_world  = foot_force_world_from_wrench(
+                model, data, q, foot_ids, f_contact, RIGHT_FOOT_IDX
+            )
+
+        # -------- integrate one step --------
         v = v + ddq * h
         q = pin.integrate(model, q, v * h)
         t_sim += h
 
-        # compute simulated COM
-        pin.centerOfMass(model, data, q, v)
-        com_sim = data.com[0].copy()
-
-        # log everything
-        t_log.append(t_sim)
-        com_ref_log.append(com_ref)
-        com_sim_log.append(com_sim)
-        f_ref_log.append(f_ref_foot_k)
-        f_qp_log.append(f_qp_foot_k)
-
-        # Safety check
+        # safety check
         if (not np.all(np.isfinite(q))) or (not np.all(np.isfinite(v))):
             print(f"[SIM] NaN/Inf at k={k}, t_sim={t_sim:.4f}; breaking.")
             robot.viz.display(q)
             break
+
+        # simulated COM
+        pin.centerOfMass(model, data, q, v)
+        com_sim = data.com[0].copy()
+
+        # -------- log stuff --------
+        t_log.append(t_sim)
+        com_ref_log.append(com_ref)
+        com_sim_log.append(com_sim)
+        f_ref_point_log.append(f_ref_point)
+        f_qp_point_log.append(F_qp_world)
 
         robot.viz.display(q)
         time.sleep(min(h * 4.0, 0.05))
 
     print(f"[SIM] Finished cycle {cycle} (or broke early).")
 
-    # --- Plot diagnostics ---
-    plot_results(t_log, com_ref_log, com_sim_log, f_ref_log, f_qp_log, N_push)
+    # phase times for vertical lines
+    t_push_end   = t_log[N_push - 1]
+    t_flight_end = t_log[N_push + N_flight - 1]
+
+    # --- generate plots ---
+    plot_results(
+        t_log,
+        com_ref_log,
+        com_sim_log,
+        f_ref_point_log,
+        f_qp_point_log,
+        t_push_end,
+        t_flight_end,
+        results_dir=RESULTS_DIR,
+    )
 
 
 if __name__ == "__main__":
