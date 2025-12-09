@@ -654,7 +654,7 @@ def plot_results(
     for i in range(3):
         ax = axes[i]
         ax.plot(t_log, com_ref_log[:, i], color=c_ref, lw=1.8, label="reference")
-        ax.plot(t_log, com_sim_log[:, i], color=c_sim, lw=1.4, ls="--", label="simulated")
+        ax.plot(t_log, com_sim_log[:, i], color=c_sim, lw=1.4, ls="--", label="WBIC")
 
         # phase markers
         ax.axvline(t_push_end, color="0.5", ls="--", lw=1.0)
@@ -678,7 +678,7 @@ def plot_results(
     for i in range(3):
         ax = axes[i]
         ax.plot(t_log, f_ref_point_log[:, i], color=c_ref, lw=1.8, label="reference")
-        ax.plot(t_log, f_qp_point_log[:, i], color=c_sim, lw=1.4, ls="--", label="ours (WBIC)")
+        ax.plot(t_log, f_qp_point_log[:, i], color=c_sim, lw=1.4, ls="--", label="WBIC")
 
         ax.axvline(t_push_end, color="0.5", ls="--", lw=1.0)
         ax.axvline(t_flight_end, color="0.5", ls="--", lw=1.0)
