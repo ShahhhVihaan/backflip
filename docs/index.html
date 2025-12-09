@@ -12,6 +12,7 @@
       padding: 0 1rem 3rem;
       background: #0b0c10;
       color: #f5f5f5;
+      line-height: 1.55;
     }
     h1, h2 {
       text-align: center;
@@ -31,6 +32,14 @@
       font-size: 0.95rem;
       color: #c0c0c0;
     }
+    .abstract {
+      background: #111218;
+      border-left: 4px solid #3aa6ff;
+      padding: 1rem 1.2rem;
+      margin: 1.8rem 0 2.4rem;
+      font-size: 0.95rem;
+      color: #e4e4e4;
+    }
   </style>
 </head>
 <body>
@@ -38,6 +47,11 @@
   <p style="text-align:center; font-size:1rem; margin-top:-0.5rem; color:#cfcfcf;">
     Vihaan Shah &amp; Shriyash Bajaj
   </p>
+
+  <div class="abstract">
+    <strong>Abstract.</strong> Control stack for executing a humanoid backflip using optimization-based planning and phase-structured whole-body control. A kino-dynamic trajectory optimizer generates a feasible acrobatic motion that jointly searches over centroidal momentum and limb kinematics, providing a consistency framework that can extend naturally to other aerial maneuvers. The offline motion is computed using a non-convex trajectory optimization and then tracked online using a whole-body impulse controller during push-off and landing, with a reduced-order MPC regulating landing contact wrench, achieving a fully analytical backflip without learning, motion capture, or heuristic references.
+  </div>
+
   <p style="text-align:center;">
     Offline trajectory optimization, online whole-body control, and MPC results.
   </p>
